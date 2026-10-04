@@ -17,6 +17,7 @@ const {
   evaluateExport, mapRow,
 } = require('./translation');
 const { parseDeliveryBody, evaluateDelivery, listBatches, loadBatch } = require('./delivery');
+const { buildDeliveryDiff, BatchDiffError } = require('./delivery-diff');
 const {
   parseTranslationBatchBody, contentHash, evaluateBatch,
   listBatches: listTranslationBatches, loadBatch: loadTranslationBatch,
@@ -2305,6 +2306,28 @@ function createApp(db) {
     const p = getProject(req, res);
     if (!p) return;
     res.json({ project_id: p.id, batches: listBatches(db, p.id) });
+  });
+
+  /**
+   * 片方审阅：两批交付字幕差异对照（只读）。
+   *   GET /api/projects/:id/deliveries/diff?base_id=<基准批次>&target_id=<目标批次>
+   * 以两批各自冻结的 WebVTT 为准，按字幕起止时间区段比较实际显示文本；语言取两批并集，
+   * 单侧出现的语言标 added/removed。快照缺失或格式损坏时指出批次和文件、整份报告失败
+   * （500，snapshot_problems 全量列出，不返回部分结果）；批次不存在/不属于项目 → 404，
+   * 参数非法 → 400。不受当前字幕、译文或术语修改影响。
+   */
+  app.get('/api/projects/:id/deliveries/diff', (req, res) => {
+    const p = getProject(req, res);
+    if (!p) return;
+    try {
+      const report = buildDeliveryDiff(db, p.id, req.query.base_id, req.query.target_id);
+      res.json(report);
+    } catch (err) {
+      if (err instanceof BatchDiffError) {
+        return res.status(err.statusCode).json(err.payload);
+      }
+      throw err;
+    }
   });
 
   /** 单个交付批次清单（关联文件、字幕集版本、规则版本；文件正文走既有下载接口） */
