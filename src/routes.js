@@ -17,6 +17,7 @@ const {
   evaluateExport, mapRow,
 } = require('./translation');
 const { parseDeliveryBody, evaluateDelivery, listBatches, loadBatch } = require('./delivery');
+const { buildBatchDiff, SnapshotError } = require('./batch-diff');
 const {
   parseTranslationBatchBody, contentHash, evaluateBatch,
   listBatches: listTranslationBatches, loadBatch: loadTranslationBatch,
@@ -2305,6 +2306,85 @@ function createApp(db) {
     const p = getProject(req, res);
     if (!p) return;
     res.json({ project_id: p.id, batches: listBatches(db, p.id) });
+  });
+
+  /**
+   * 片方审阅：两个交付批次冻结字幕的实际差异（只读）。
+   *   GET /api/projects/:id/deliveries/diff?base=<基准批次ID>&target=<目标批次ID>
+   *
+   * 以两批各自冻结的 WebVTT 为准，按字幕起止区段比较实际显示文本（不按行号配对，
+   * 拆分/合并/整体移时与空白↔字幕转换均如实报出）；语言取两批并集，仅一侧有的标
+   * added/removed。查询只读，不受当前字幕、译文或术语修改影响。
+   *   400 缺少/非法批次 ID；404 批次不存在或不属于该项目（明确指出是哪一个）；
+   *   500 快照缺失或格式损坏：指出批次与文件，整份报告失败，不返回部分结果。
+   * 同一批次与自身比较、快照完好时返回空差异。
+   *
+   * 注意：须注册在 /deliveries/:bid 之前，否则 "diff" 会被当作批次 ID。
+   */
+  app.get('/api/projects/:id/deliveries/diff', (req, res) => {
+    const p = getProject(req, res);
+    if (!p) return;
+
+    const parseId = (raw, name) => {
+      if (raw === undefined || raw === null || String(raw).trim() === '') {
+        return { error: `缺少 ${name} 批次 ID（查询参数 ${name}=<批次ID>）` };
+      }
+      if (!/^\d+$/.test(String(raw).trim())) {
+        return { error: `${name} 批次 ID ${JSON.stringify(raw)} 非法：必须是正整数` };
+      }
+      const id = Number(String(raw).trim());
+      if (id < 1) return { error: `${name} 批次 ID 必须是正整数` };
+      return { id };
+    };
+    const baseParsed = parseId(req.query.base, 'base');
+    const targetParsed = parseId(req.query.target, 'target');
+    if (baseParsed.error || targetParsed.error) {
+      return res.status(400).json({
+        error: '批次对照请求非法',
+        errors: [baseParsed.error, targetParsed.error].filter(Boolean),
+      });
+    }
+
+    // 批次存在性与归属：先按主键定位给出明确原因，再核对是否属于该项目
+    const ownBatch = (id, role) => {
+      const rowAny = db.prepare('SELECT id, project_id FROM delivery_batches WHERE id = ?').get(id);
+      if (!rowAny) {
+        return { error: { status: 404, body: { error: `${role}批次 ${id} 不存在` } } };
+      }
+      if (rowAny.project_id !== p.id) {
+        return {
+          error: {
+            status: 404,
+            body: {
+              error: `${role}批次 ${id} 不属于项目 ${p.id}（该批次属于项目 ${rowAny.project_id}），拒绝跨项目对照`,
+              batch_id: id, actual_project_id: rowAny.project_id, request_project_id: p.id,
+            },
+          },
+        };
+      }
+      return { row: db.prepare('SELECT * FROM delivery_batches WHERE id = ?').get(id) };
+    };
+    const base = ownBatch(baseParsed.id, '基准');
+    if (base.error) return res.status(base.error.status).json(base.error.body);
+    const target = ownBatch(targetParsed.id, '目标');
+    if (target.error) return res.status(target.error.status).json(target.error.body);
+
+    try {
+      // 只读事务：保证整份报告读到同一时刻的快照集合（查询本身不写任何数据）
+      const report = db.transaction(() => buildBatchDiff(db, p.id, base.row, target.row))();
+      res.json(report);
+    } catch (err) {
+      if (err instanceof SnapshotError) {
+        return res.status(500).json({
+          error: `交付批次对照失败：${err.message}；整份报告失败，未返回部分结果`,
+          code: err.code,
+          batch_id: err.batch_id,
+          file: err.file,
+          detail: err.detail,
+        });
+      }
+      throw err;
+    }
   });
 
   /** 单个交付批次清单（关联文件、字幕集版本、规则版本；文件正文走既有下载接口） */

@@ -20,6 +20,7 @@
 - **说话人标注与署名版导出（本轮新增）**：项目内维护**说话人编号（服务端分配、不回收、不可变）→ 显示名**，显示名可修改，**改名推进归属版本** `attribution_version`（归属标注写入同样推进）。归属**按字幕 ID 锚定**：提交按字幕 ID 携带读取时**行版本** `cue_version` 与**归属版本**，`speaker_number` 必须存在；过期返回当前值，**锁定行也可标注**（单行或整批，整批任一过期/编号缺失则整批不写入）。**重排保留 ID 的行归属继续有效**（仅顺序变化或原地更新都不失效）；**原行删除后归属留作历史，新行待标注，绝不按展示序号转移**。署名版导出携带**字幕集版本与归属版本**，在**同一事务**内核对每条当前字幕均有有效归属（说话人仍在名册、显示名可安全写入标签）；可选择**原文**或**一种目标语言**，选择译文时携带**逐行译文版本**清单，译文须逐行 `current`、版本未变且满足现行字数/字速，否则**按行列原因且不生成快照**。署名版正文按 WebVTT 语法写**说话人标签** `<v 显示名>文本</v>`，并**拒绝含换行或标签界定符（`<`、`>`）的显示名**；**原文与译文共用同一时间轴**。**普通导出及旧下载内容保持兼容（不含标签）**，署名版**另存**为可查询、可下载的**不可变快照**（改名、改归属、改字幕都不影响旧快照）。
 - **译审术语对照表（本轮新增）**：译审按**目标语言**维护「源词 → 规定译法」对照表，**整表修改**（整体替换词条）并携带读取时**术语版本**（未配置传 `0`），过期返回 `409` 与当前表；词与译法均为**非空文本**（无首尾空白、≤100 字），**同一语言源词不得重复**，允许提交空数组清空该语言术语。按**当前原文字幕文本精确匹配**源词（字面子串）：每条命中源词的译文都**必须包含对应规定译法**，**一行命中多词时每个规定译法都须满足**；**未配置术语的语言完全不受影响**。另有只读缺失查询，按**语言、字幕 ID 与源词**逐条列出缺失译法并附当前术语版本（无译文行也列出）。**译文即使缺失规定译法仍可保存供修正**（保存响应与并列视图附 `term_issues`），**术语变更不改变既有译文的 current/review 状态**。**单语言译文导出、多语言同版交付与译文署名版导出**在**原有事务内读取当前术语**并核对：任一缺失逐行（多语交付按语言+行，署名导出行内带 `translation_term_missing`）报错且**不生成快照、不消耗版本**；**原文导出、现有译文读写约定与旧导出快照保持兼容**（术语收紧后旧快照仍可下载且内容不变）。
 - **重排后历史译文找回（本轮新增）**：重排删除源行后，译文按既有约定留作**历史**（绝不按序号自动挪用）。校对者可先按语言查询当前**缺译行**的历史候选及**匹配依据**（只读）：只有与当前行属于**同一次逐词导入**（导入代次 `import_version` 一致）且**词区间**与**源字幕文本**均一致的候选**可恢复**；**重新导入前的旧代次历史**、**无法确认导入归属的旧库历史**（`src_import_id` 为空）同样列出但只能查看、不能恢复。恢复请求携带读取时**字幕集版本** `sub_version`、**规则版本** `rules_version`、**目标行**及**候选译文 ID + 版本**，可一次选择多行；服务端在**同一事务内**重新核对目标仍缺译、候选三要素仍匹配以及候选文本满足**现行字数/字速**规则，任一失效都**按行说明原因且整组不写**。成功后为每行写成一条**普通 current 译文**（新版本从 1 开始），**原历史记录保留不改**、**不推进 `sub_version`**、**旧导出快照不变**；术语缺失仍按现有译文视图 `term_issues` 提示并继续阻止导出；恢复出的译文可继续使用逐行保存/确认、整批回填、单语言导出与多语交付等既有操作。
+- **片方审阅：两次交付实际字幕差异（本轮新增，只读）**：输入同项目**基准批次**与**目标批次** ID，即返回**原文及两批语言并集**的对照。只在一侧出现的语言标为**新增/移除**；双方都有的文件以**各自冻结的 WebVTT** 为准，按**字幕起止时间构成的区段**比较实际显示文本（`null` 表示该区段无字幕），列出差异区段的**起止毫秒、两侧文本及两侧文件版本/下载地址**；**拆分、合并或整体移时不按行号配对**，**空白与字幕的转换不漏报**；相邻差异区段两侧各自文本均未变时**合并**。快照完好时同批比较返回**空差异**。批次不属于项目或不存在时明确拒绝（`404`）；快照缺失或格式损坏时指出批次与文件，**整份报告失败、不返回部分结果**（`500`）。查询只读，不受当前字幕、译文或术语修改影响，原有交付与下载约定保持兼容。
 
 ## 启动
 
@@ -112,6 +113,7 @@ Compose 默认把 SQLite 挂到命名卷 `subtitle-data` 持久化（含所有�
 | `POST` | `/api/projects/:id/deliveries` | **片方交付批次**：`{note?, sub_version, rules_version, languages:[...], translations:{lang:[{subtitle_id, version}]}}`；事务内核对版本/结构/规则/逐行译文，通过则原文与各语言各生成一个不可变 WebVTT 并关联批次 |
 | `GET` | `/api/projects/:id/deliveries` | 交付批次清单（倒序，含每批文件清单、字幕集/规则版本） |
 | `GET` | `/api/projects/:id/deliveries/:bid` | 单个批次清单（文件序列版本与既有下载地址；正文走下载接口） |
+| `GET` | `/api/projects/:id/deliveries/diff?base=<批次ID>&target=<批次ID>` | **片方审阅：两批冻结字幕实际差异（只读）**：原文 + 两批语言并集对照；共有文件按冻结 WebVTT 的时间区段比较显示文本，单侧语言标新增/移除；快照缺失或损坏整份报告失败 |
 | `GET` | `/api/projects/:id/speakers` | 说话人名册：编号→显示名（附每条有效归属数）与当前 `attribution_version` |
 | `POST` | `/api/projects/:id/speakers` | 新建说话人：`{display_name}`（编号服务端分配、不回收；含换行/`<`/`>` → `400`） |
 | `PATCH` | `/api/projects/:id/speakers/:number` | 改显示名：`{attribution_version, display_name}`；改名推进归属版本，版本过期 → `409`，编号不存在 → `404` |
@@ -337,6 +339,56 @@ Compose 默认把 SQLite 挂到命名卷 `subtitle-data` 持久化（含所有�
 
 完整 curl 示例：`examples/deliveries-api.sh`（准备双语译文→非法/漂移/缺译/待复核/译文版本漂移各类失败→成功批次→清单查询→既有接口下载→后续编辑不改旧批次→第二批在各序列取新版本）。
 
+### 片方审阅：两次交付的实际字幕差异（只读对照）
+
+片方审阅同一项目两次交付的实际字幕差异时，调用一个只读接口，输入**基准批次**与**目标批次** ID：
+
+```
+GET /api/projects/:id/deliveries/diff?base=<基准批次ID>&target=<目标批次ID>
+```
+
+调用示例：
+
+```bash
+curl -s "http://localhost:3000/api/projects/1/deliveries/diff?base=1&target=2"
+```
+
+- **比较对象是两批各自冻结的 WebVTT 快照**（批次 `delivery_files` 关联的 `exports` / `translation_exports` 行），不是当前字幕/译文；查询只读，不受当前字幕、译文或术语修改影响，也不消耗或推进任何版本。
+- **语言取两批并集**，每个文件给出对照结论：`unchanged`（共有且无差异）/ `changed`（共有且有差异区段）/ `added`（仅目标批次有，新增语言）/ `removed`（仅基准批次有，移除语言）；原文始终在 `files[0]`。
+- **按字幕起止时间构成的区段比较实际显示文本，绝不按行号/顺序配对**：拆分、合并、整体移时都按真实时间覆盖报出；字幕之间的**空白**（区间内无字幕，`null`）与字幕的转换同样列为差异区段，不漏报。
+- **相邻差异区段合并**：相邻区段内若两侧各自的显示文本均未变，则合并为一个区段（中间有相等区段则隔断）。
+- 每个差异区段给出 `start_ms` / `end_ms`（起止毫秒）、`base_text` / `target_text`（两侧实际显示文本，`null` 表示该侧此时段无字幕），文件级条目另给两侧**文件版本**与既有下载地址 `base.version`/`target.version`/`download_url`（下载约定不变）。
+- **快照完好时，同批比较（`base == target`）或两批内容相同（仅序列版本号不同）返回空差异**（所有文件 `unchanged`、`segments: []`）。
+- 错误约定：
+  - `400` 缺少或非法的 `base`/`target`（非正整数），`errors[]` 逐项说明；
+  - `404` 批次不存在，或**批次不属于该项目**（消息指出批次实际所属项目，拒绝跨项目对照）；
+  - `500` 快照**缺失**（`code: snapshot_missing`，快照行/正文丢失）或**格式损坏**（`code: snapshot_corrupt`，WebVTT 无法解析、时间非法/重叠、`cue_count` 与正文不一致等）：响应指出批次 ID 与具体文件（`kind`/`lang`/`ord`）及原因，**整份报告失败，不返回任何部分结果**。
+
+返回示例（节选）：
+
+```json
+{
+  "project_id": 1,
+  "base_batch_id": 1,
+  "target_batch_id": 2,
+  "languages": { "union": ["en", "fr", "ja-JP"], "base": ["en", "fr"], "target": ["fr", "ja-JP"],
+                 "added": ["ja-JP"], "removed": ["en"] },
+  "files": [
+    { "kind": "source", "lang": null, "status": "changed",
+      "base":   { "batch_id": 1, "version": 1, "download_url": "/api/projects/1/exports/1" },
+      "target": { "batch_id": 2, "version": 2, "download_url": "/api/projects/1/exports/2" },
+      "diff_count": 1,
+      "segments": [{ "start_ms": 0, "end_ms": 1000, "base_text": "你好世界", "target_text": "你好世界呀" }] },
+    { "kind": "translation", "lang": "en", "status": "removed",
+      "base": { "batch_id": 1, "version": 1, "download_url": "/api/projects/1/translations/en/exports/1" },
+      "target": null, "diff_count": 0, "segments": [] }
+  ],
+  "diff_file_count": 1
+}
+```
+
+完整 curl 示例：`examples/delivery-diff-api.sh`（造两批语言集合不同的交付→对照差异/新增/移除→同批自比空差异→再改当前字幕证明只读→参数/不存在/跨项目拒绝）。
+
 ## 说话人标注与署名版导出（名册 → 按字幕 ID 归属 → 带标签不可变快照）
 
 审校人员在现有字幕上标明发言者，并导出带说话人标签的 WebVTT。归属**按字幕 ID 锚定**（不按展示序号），普通导出与旧下载内容保持兼容，署名版另存独立的不可变快照序列。
@@ -546,6 +598,7 @@ src/word-revision.js 逐词时间修正：请求解析 + 候选整版核对（�
 src/translation.js   多语言译文字幕：解析/规则校验/并列视图/失效对账（current→review/history）/导出核对
 src/translation-batch.js 译者整批译文回填：请求解析/内容指纹/事务内逐行版本与规则核对/幂等与批次清单
 src/delivery.js      片方多语交付批次：请求解析 + 事务内整版/逐语言逐行核对 + 批次清单视图
+src/batch-diff.js    片方审阅：冻结 WebVTT 解析与完整性校验 + 按时间区段的显示文本差异（不按行号配对/空白不丢/相邻合并）+ 两批语言并集编排
 src/speaker.js       说话人标注：名册/显示名校验/归属批量与单行乐观锁核对/删除行历史对账/署名版导出事务核对
 src/glossary.js      译审术语表：整表替换与乐观锁/词条校验（非空/同语言源词唯一）/源词精确匹配核对/缺失查询与导出/交付/署名导出的术语闸门
 src/translation-recovery.js 重排后历史译文找回：缺译行候选视图（同导入代次+词区间+源文三要素匹配依据）/组级恢复请求解析与事务内重核（目标仍缺译/候选失效/现行字数字速，整组原子）
@@ -558,9 +611,10 @@ examples/word-revisions-api.sh 逐词时间修正（提交→预览→确认）�
 examples/translations-api.sh 多语言译文字幕（保存→查询→失效/复核→确认→按语言导出）的完整 curl 调用示例
 examples/translation-batches-api.sh 译者整批译文回填（整批写入→幂等/冲突→过期/违规→覆盖待复核→下游读取）的完整 curl 调用示例
 examples/deliveries-api.sh 片方多语交付批次（核对→整批冻结→清单查询→既有接口下载）的完整 curl 调用示例
+examples/delivery-diff-api.sh 片方审阅两批交付差异（语言并集/新增移除→时间区段差异→同批空差异→只读→拒绝示例）的完整 curl 调用示例
 examples/speakers-api.sh 说话人标注与署名版导出（名册→归属→重排身份保持→原文/译文署名快照→兼容普通导出）的完整 curl 调用示例
 examples/glossaries-api.sh 译审术语对照表（建表/乐观锁→缺失查询→单语言导出/多语交付/译文署名导出三类闸门→旧快照兼容）的完整 curl 调用示例
 examples/translation-recovery-api.sh 重排后历史译文找回（候选查看与匹配依据→非法/漂移/错配拒绝→组级恢复→重新导入后旧历史不可恢复）的完整 curl 调用示例
-test/                node:test 单元 + API 集成测试（revision / word-revision / translation / translation-batch / translation-recovery / delivery / speaker / glossary 覆盖八类流程）
+test/                node:test 单元 + API 集成测试（revision / word-revision / translation / translation-batch / translation-recovery / delivery / batch-diff / speaker / glossary 覆盖各类流程）
 Dockerfile / docker-compose.yml
 ```
